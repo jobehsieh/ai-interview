@@ -59,6 +59,14 @@ ${jobDescription}
 }
 
 export async function POST(request: Request) {
+  const apiKey = request.headers.get("x-opencode-api-key");
+  if (!apiKey || !apiKey.trim()) {
+    return Response.json(
+      { error: "缺少 OpenCode API 金鑰，請先於設定中輸入你的 API 金鑰" },
+      { status: 401 },
+    );
+  }
+
   let body: InterviewRequestBody;
   try {
     body = await request.json();
@@ -136,9 +144,9 @@ export async function POST(request: Request) {
   let suggestion: string | undefined;
   try {
     const [nextStepResult, suggestionResult] = await Promise.all([
-      callOpenCodeGo(nextStepMessages, sessionId),
+      callOpenCodeGo(nextStepMessages, sessionId, apiKey),
       suggestionMessages
-        ? callOpenCodeGo(suggestionMessages, sessionId)
+        ? callOpenCodeGo(suggestionMessages, sessionId, apiKey)
         : Promise.resolve(undefined),
     ]);
     replyContent = nextStepResult;

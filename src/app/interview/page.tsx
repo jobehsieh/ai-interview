@@ -4,7 +4,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 // 從共用型別檔案匯入「訊息」與「API 回應」的型別定義，確保前後端資料格式一致。
 import type {
   ChatMessage,
@@ -16,6 +16,9 @@ import {
   MAX_TOTAL_QUESTIONS,
   MIN_TOTAL_QUESTIONS,
 } from "@/lib/interview-types";
+// BYOK（Bring Your Own Key）：使用者的 OpenCode API 金鑰只存在瀏覽器的 localStorage，
+// 不會存進我們的伺服器或環境變數，所以需要這兩個輔助函式讀寫瀏覽器儲存空間。
+import { getStoredApiKey, setStoredApiKey } from "@/lib/api-key-storage";
 
 // 定義整個面試流程的三個階段：
 // - setup：使用者尚未開始，正在填寫職缺描述與題數
@@ -29,18 +32,24 @@ type Stage = "setup" | "interviewing" | "finished";
 type InterviewSuccessBody = Exclude<InterviewResponseBody, { error: string }>;
 
 // 統一封裝呼叫 /api/interview 的邏輯，供「開始面試」與「送出回答」共用。
-async function requestInterview(payload: {
-  jobDescription: string; // 職缺描述全文
-  history: ChatMessage[]; // 目前為止的完整問答紀錄（assistant 問題 + user 回答交錯）
-  questionCount: number; // 目前已經問過幾題（給後端判斷下一步要出題還是收尾）
-  totalQuestions: number; // 使用者設定的總題數
-  sessionId: string; // 同一場面試共用的識別碼，讓 OpenCode Go 能做路由與快取優化
-}): Promise<InterviewSuccessBody> {
+async function requestInterview(
+  payload: {
+    jobDescription: string; // 職缺描述全文
+    history: ChatMessage[]; // 目前為止的完整問答紀錄（assistant 問題 + user 回答交錯）
+    questionCount: number; // 目前已經問過幾題（給後端判斷下一步要出題還是收尾）
+    totalQuestions: number; // 使用者設定的總題數
+    sessionId: string; // 同一場面試共用的識別碼，讓 OpenCode Go 能做路由與快取優化
+  },
+  apiKey: string, // BYOK：使用者自己的 OpenCode API 金鑰，透過自訂 header 帶給後端
+): Promise<InterviewSuccessBody> {
   // 呼叫自家後端 API route（見 src/app/api/interview/route.ts），而不是直接呼叫 OpenCode Go，
-  // 這樣可以把金鑰與 prompt 邏輯留在伺服器端，不會外洩到瀏覽器。
+  // 這樣 prompt 邏輯可以留在伺服器端；金鑰則是每次請求由前端帶上，伺服器不會保存它。
   const res = await fetch("/api/interview", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-opencode-api-key": apiKey,
+    },
     body: JSON.stringify(payload),
   });
 
@@ -114,11 +123,30 @@ export default function InterviewPage() {
   // 用 useRef 而非 useState 存 sessionId，因為它只是要在多次 API 呼叫之間保持穩定的值，
   // 改變它不需要觸發畫面重新渲染，用 ref 可以避免不必要的 re-render。
   const sessionIdRef = useRef<string>("");
+  // BYOK：使用者自己的 OpenCode API 金鑰。一開始給空字串，
+  // 因為伺服器端渲染（SSR）階段沒有 window.localStorage，要等下面的 useEffect 在瀏覽器掛載後才讀取真正的值。
+  const [apiKey, setApiKey] = useState("");
+
+  // 頁面掛載時，從瀏覽器的 localStorage 讀回使用者之前存過的金鑰（如果有的話），
+  // 讓使用者不用每次重新整理頁面都要再貼一次金鑰。
+  // 這裡刻意在掛載後才用 effect 讀取（而非用 useState 的 lazy initializer），
+  // 因為 SSR 階段沒有 window.localStorage，若在 render 階段讀取會導致 SSR 與 client 首次渲染的
+  // hydration 結果不一致；等 effect 在瀏覽器掛載後執行，才是安全讀取瀏覽器專屬資料的時機。
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setApiKey(getStoredApiKey());
+  }, []);
+
+  // 使用者編輯金鑰輸入框時，同時更新畫面上的 state，並立刻寫回 localStorage 保存。
+  function handleApiKeyChange(value: string) {
+    setApiKey(value);
+    setStoredApiKey(value);
+  }
 
   // ---- 按下「開始模擬面試」時執行 ----
   async function handleStart() {
-    // 防呆：職缺描述是空字串（或全是空白）就不送出；已經在 loading 中也不重複觸發。
-    if (!jobDescription.trim() || loading) return;
+    // 防呆：職缺描述、API 金鑰任一為空就不送出；已經在 loading 中也不重複觸發。
+    if (!jobDescription.trim() || !apiKey.trim() || loading) return;
     setLoading(true);
     setError(null);
     // 每次「開始一場新面試」都重新產生一組 UUID 當作 session id，
@@ -127,13 +155,16 @@ export default function InterviewPage() {
     try {
       // 第一次呼叫：history 是空陣列（還沒有任何問答），questionCount 是 0，
       // 後端看到 questionCount(0) < totalQuestions，就知道要出「第一題」。
-      const result = await requestInterview({
-        jobDescription,
-        history: [],
-        questionCount: 0,
-        totalQuestions,
-        sessionId: sessionIdRef.current,
-      });
+      const result = await requestInterview(
+        {
+          jobDescription,
+          history: [],
+          questionCount: 0,
+          totalQuestions,
+          sessionId: sessionIdRef.current,
+        },
+        apiKey,
+      );
       // 正常情況下第一次呼叫一定會拿到 "question"（不可能一開始就是 final）。
       if (result.type === "question") {
         // 把 AI 出的第一題放進訊息陣列，畫面上會顯示成一則 AI 的聊天泡泡。
@@ -177,13 +208,16 @@ export default function InterviewPage() {
     try {
       // 把「包含最新回答」的完整歷史紀錄與目前的 questionCount 送給後端。
       // 後端會依據 questionCount 是否已經達到 totalQuestions，決定要「再出一題」還是「產生總評」。
-      const result = await requestInterview({
-        jobDescription,
-        history: nextHistory,
-        questionCount,
-        totalQuestions,
-        sessionId: sessionIdRef.current,
-      });
+      const result = await requestInterview(
+        {
+          jobDescription,
+          history: nextHistory,
+          questionCount,
+          totalQuestions,
+          sessionId: sessionIdRef.current,
+        },
+        apiKey,
+      );
 
       // 不論這次回應是「下一題」還是「最終評分」，只要後端有附帶 suggestion，
       // 就代表這是「針對使用者剛剛那則回答」的建議，要記錄起來。
@@ -291,6 +325,23 @@ export default function InterviewPage() {
         {/* ---------------- 階段一：setup（填寫職缺描述與題數） ---------------- */}
         {stage === "setup" && (
           <div className="flex flex-col gap-5 rounded-3xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+            {/* BYOK 設定：使用者自己的 OpenCode API 金鑰。
+                type="password" 讓輸入內容預設遮蔽，避免旁人看到；
+                onChange 同時更新 state 與寫入 localStorage，讓下次造訪頁面時不用重新輸入。 */}
+            <label className="flex flex-col gap-2 text-sm font-medium text-zinc-800 dark:text-zinc-200">
+              OpenCode API 金鑰
+              <input
+                type="password"
+                className="rounded-xl border border-zinc-300 bg-white p-3 text-sm text-zinc-900 outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                placeholder="sk-..."
+                value={apiKey}
+                onChange={(e) => handleApiKeyChange(e.target.value)}
+                autoComplete="off"
+              />
+              <span className="text-xs font-normal text-zinc-500 dark:text-zinc-400">
+                金鑰只會存在你瀏覽器的 localStorage，並在每次提問時透過請求帶給我們的伺服器轉發，我們不會保存它。
+              </span>
+            </label>
             {/* 職缺描述輸入框：受控元件（controlled component），
                 value 綁定 state、onChange 更新 state，兩者保持同步。 */}
             <label className="flex flex-col gap-2 text-sm font-medium text-zinc-800 dark:text-zinc-200">
@@ -329,11 +380,11 @@ export default function InterviewPage() {
                 }}
               />
             </label>
-            {/* 開始按鈕：職缺描述為空，或正在 loading 時停用（disabled），避免重複觸發或送出空白內容。 */}
+            {/* 開始按鈕：職缺描述或 API 金鑰為空，或正在 loading 時停用（disabled），避免重複觸發或送出不完整的請求。 */}
             <button
               className="self-start rounded-full bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white shadow-sm shadow-indigo-600/30 transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
               onClick={handleStart}
-              disabled={!jobDescription.trim() || loading}
+              disabled={!jobDescription.trim() || !apiKey.trim() || loading}
             >
               {loading ? "準備問題中..." : "開始模擬面試"}
             </button>

@@ -37,13 +37,13 @@ async function requestChatCompletion(
 export async function callOpenCodeGo(
   messages: OpenCodeGoMessage[],
   sessionId: string,
+  apiKey: string,
 ): Promise<string> {
-  const apiKey = process.env.OpenCode_GO_KEY;
   const baseUrl = process.env.OPENCODE_GO_BASE_URL;
   const model = process.env.OPENCODE_GO_MODEL;
 
   if (!apiKey) {
-    throw new Error("缺少環境變數 OpenCode_GO_KEY");
+    throw new Error("缺少 OpenCode API 金鑰");
   }
   if (!baseUrl) {
     throw new Error("缺少環境變數 OPENCODE_GO_BASE_URL，請於 .env.local 設定");
